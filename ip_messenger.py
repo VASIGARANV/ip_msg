@@ -685,7 +685,6 @@ class IPMessenger:
         self.user_tree = ttk.Treeview() # Initialize with empty Treeview
         self.member_count_label = tk.Label() # Initialize with empty Label
         self.attachment_path_var = tk.StringVar()
-        self.is_server_running = True
         self.offered_files = {} # {filename: abs_path}
         self.offered_files_lock = threading.Lock()
         
@@ -783,7 +782,46 @@ class IPMessenger:
             s.close()
             return ip
         except Exception:
-            return "127.0.0.1"
+            try:
+                # Find first non-loopback IP
+                hostname = socket.gethostname()
+                for ip in socket.gethostbyname_ex(hostname)[2]:
+                    if not ip.startswith("127."):
+                        return ip
+                return "127.0.0.1"
+            except Exception:
+                return "127.0.0.1"
+
+    def get_all_local_ips(self):
+        """Get all active local IPv4 interface addresses"""
+        ips = set()
+        try:
+            hostname = socket.gethostname()
+            info = socket.gethostbyname_ex(hostname)
+            for ip in info[2]:
+                if not ip.startswith("127."):
+                    ips.add(ip)
+        except Exception:
+            pass
+
+        # Socket connect tricks to resolve active routes
+        for target in [("8.8.8.8", 80), ("192.168.1.254", 80), ("10.0.0.254", 80)]:
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                s.settimeout(0.1)
+                s.connect(target)
+                ip = s.getsockname()[0]
+                s.close()
+                if not ip.startswith("127."):
+                    ips.add(ip)
+            except Exception:
+                pass
+
+        if not ips:
+            primary = self.get_local_ip()
+            if primary:
+                ips.add(primary)
+        return list(ips)
     
     def setup_ui(self):
         """Setup the user interface"""
@@ -925,10 +963,14 @@ class IPMessenger:
             wrap=tk.WORD,
             width=70,
             height=20,
-            font=("Arial", 10)
+            font=("Arial", 10),
+            exportselection=False
         )
         self.message_text.pack(fill=tk.BOTH, expand=True)
         self.message_text.focus_set()
+        
+        # Attach right-click context menu
+        self._setup_message_context_menu()
         
         # Store the insertion point for new messages
         self.message_insert_point = "1.0"
@@ -969,6 +1011,114 @@ class IPMessenger:
         self.update_user_list()
         self.update_member_count()
     
+    # ── Message-area right-click context menu ────────────────────────────────
+    def _setup_message_context_menu(self):
+        """Create the right-click context menu for the message text area."""
+        self._msg_ctx_menu = tk.Menu(self.root, tearoff=0)
+        self.message_text.bind("<Button-3>", self._show_message_context_menu)
+
+    def _show_message_context_menu(self, event):
+        """Show the context menu. Only Undo, Save Selected Image, and
+        Edit Selected Image are permanently disabled."""
+        menu = self._msg_ctx_menu
+        menu.delete(0, tk.END)
+
+        widget = self.message_text
+
+        # Save selection range BEFORE the menu steals focus
+        try:
+            sel_start = widget.index(tk.SEL_FIRST)
+            sel_end = widget.index(tk.SEL_LAST)
+        except tk.TclError:
+            sel_start = None
+            sel_end = None
+
+        # ── Undo: always disabled ────────────────────────────────────────────
+        menu.add_command(
+            label="Undo",
+            state=tk.DISABLED,
+            foreground="#888888"
+        )
+
+        menu.add_separator()
+
+        # ── Cut ──────────────────────────────────────────────────────────────
+        def _do_cut():
+            if sel_start and sel_end:
+                selected_text = widget.get(sel_start, sel_end)
+                self.root.clipboard_clear()
+                self.root.clipboard_append(selected_text)
+                widget.delete(sel_start, sel_end)
+        menu.add_command(label="Cut", command=_do_cut)
+
+        # ── Copy ─────────────────────────────────────────────────────────────
+        def _do_copy():
+            if sel_start and sel_end:
+                selected_text = widget.get(sel_start, sel_end)
+                self.root.clipboard_clear()
+                self.root.clipboard_append(selected_text)
+        menu.add_command(label="Copy", command=_do_copy)
+
+        # ── Paste ────────────────────────────────────────────────────────────
+        def _do_paste():
+            try:
+                clip = self.root.clipboard_get()
+            except tk.TclError:
+                return
+            # If there was a selection, replace it
+            if sel_start and sel_end:
+                widget.delete(sel_start, sel_end)
+                widget.insert(sel_start, clip)
+            else:
+                widget.insert(tk.INSERT, clip)
+        menu.add_command(label="Paste", command=_do_paste)
+
+        # ── Delete ───────────────────────────────────────────────────────────
+        def _do_delete():
+            if sel_start and sel_end:
+                widget.delete(sel_start, sel_end)
+            else:
+                widget.delete(tk.INSERT)
+        menu.add_command(label="Delete", command=_do_delete)
+
+        menu.add_separator()
+
+        # ── Select All ───────────────────────────────────────────────────────
+        menu.add_command(
+            label="Select All",
+            command=lambda: (widget.tag_add(tk.SEL, "1.0", tk.END),
+                             widget.mark_set(tk.INSERT, "1.0"))
+        )
+
+        menu.add_separator()
+
+        # ── Save Selected Image: always disabled ─────────────────────────────
+        menu.add_command(
+            label="Save Selected Image...",
+            state=tk.DISABLED,
+            foreground="#888888"
+        )
+
+        # ── Edit Selected Image: always disabled ─────────────────────────────
+        menu.add_command(
+            label="Edit Selected Image...",
+            state=tk.DISABLED,
+            foreground="#888888"
+        )
+
+        # ── Insert Image File: always enabled ────────────────────────────────
+        menu.add_command(
+            label="Insert Image File...",
+            command=self.attach_image
+        )
+
+        # Display the menu
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+        return "break"
+
     def refresh_user_list(self):
         """Refresh the user list"""
         self.update_user_list()
@@ -1953,25 +2103,11 @@ class IPMessenger:
         messagebox.showinfo("Settings", "Settings applied successfully.")
 
     def send_immediate_broadcast(self):
-        """Send a single presence broadcast immediately"""
-        if self.broadcast_socket:
-            try:
-                broadcast_data = json.dumps({
-                    'type': 'presence',
-                    'username': self.username,
-                    'group': self.group,
-                    'hostname': self.hostname,
-                    'ip': self.host,
-                    'port': self.port
-                })
-                host_parts = self.host.split('.')
-                network = '.'.join(host_parts[:-1]) + '.255' if len(host_parts) > 1 else '255.255.255.255'
-                self.broadcast_socket.sendto(
-                    broadcast_data.encode('utf-8'),
-                    (network, self.broadcast_port)
-                )
-            except Exception:
-                pass
+        """Send a single presence broadcast immediately on all interfaces"""
+        try:
+            self.broadcast_presence()
+        except:
+            pass
     
     def open_log_viewer(self):
         """Open IPMsg-style Log Viewer backed by SQLite database."""
@@ -2078,7 +2214,7 @@ class IPMessenger:
                 message_to_send = self.seal_message(message)
 
             # If sending to self, handle differently
-            if target_ip == self.host:
+            if target_ip in self.get_all_local_ips() or target_ip in ["127.0.0.1", "localhost"]:
                 self.handle_self_message(message_to_send, attached_files)
                 return True
             
@@ -2299,12 +2435,13 @@ class IPMessenger:
                     return
 
                 # Update discovered users
-                self.discovered_users[sender_ip] = {
-                    'username': sender_username or 'Unknown',
-                    'hostname': message_data.get('sender_hostname', sender_ip),
-                    'group': '',
-                    'last_seen': datetime.datetime.now()
-                }
+                if sender_ip not in self.get_all_local_ips():
+                    self.discovered_users[sender_ip] = {
+                        'username': sender_username or 'Unknown',
+                        'hostname': message_data.get('sender_hostname', sender_ip),
+                        'group': '',
+                        'last_seen': datetime.datetime.now()
+                    }
                 
                 # Show received message notification
                 message = message_data.get('message', '')
@@ -2633,7 +2770,7 @@ class IPMessenger:
         print(f"[DEBUG] Receipt Target: {target_ip}")
         
         # Comprehensive self-check for local testing
-        local_ips = ["127.0.0.1", "localhost", self.host, self.get_local_ip()]
+        local_ips = set(self.get_all_local_ips()) | {"127.0.0.1", "localhost", self.host}
         if any(ip in target_ip for ip in local_ips) or any(target_ip in ip for ip in local_ips):
             print("[DEBUG] Self-Receipt Triggered")
             self.root.after(100, lambda: self.show_opened_toast_notification(self.username))
@@ -3116,9 +3253,8 @@ class IPMessenger:
         try:
             # ── Special Case: Self Transfer (Reliability) ───────────────────────
             # Normalize IPs for comparison
-            is_self = (sender_ip == self.host or 
-                      sender_ip in ["127.0.0.1", "localhost", "0.0.0.0"] or
-                      sender_ip == socket.gethostbyname(socket.gethostname()))
+            is_self = (sender_ip in self.get_all_local_ips() or 
+                       sender_ip in ["127.0.0.1", "localhost", "0.0.0.0"])
             
             if is_self:
                 with self.offered_files_lock:
@@ -3235,6 +3371,44 @@ class IPMessenger:
                 return message
         return message
     
+    def broadcast_presence(self):
+        """Broadcast presence on all active local interfaces"""
+        local_ips = self.get_all_local_ips()
+        for ip in local_ips:
+            broadcast_data = json.dumps({
+                'type': 'presence',
+                'username': self.username,
+                'group': self.group,
+                'hostname': self.hostname,
+                'ip': ip,
+                'port': self.port
+            })
+            
+            host_parts = ip.split('.')
+            if len(host_parts) == 4:
+                if ip.startswith("169.254"):
+                    network = "169.254.255.255"
+                else:
+                    network = '.'.join(host_parts[:-1]) + '.255'
+            else:
+                network = '255.255.255.255'
+                
+            try:
+                # Bind temporary UDP socket to specific interface IP to force routing
+                sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                sock.bind((ip, 0))
+                
+                # Send to calculated subnet broadcast
+                sock.sendto(broadcast_data.encode('utf-8'), (network, self.broadcast_port))
+                
+                # Also send to global broadcast address as fallback
+                sock.sendto(broadcast_data.encode('utf-8'), ('255.255.255.255', self.broadcast_port))
+                sock.close()
+            except Exception:
+                pass
+
     def start_broadcast(self):
         """Start broadcasting presence on the network"""
         try:
@@ -3248,46 +3422,11 @@ class IPMessenger:
             pass
     
     def broadcast_loop(self):
-        """Broadcast presence periodically and detect network changes"""
+        """Broadcast presence periodically on all interfaces and detect local IP changes"""
         while self.is_server_running:
             try:
-                # Refresh local IP in case network changed (e.g. LAN cable inserted)
-                new_ip = self.get_local_ip()
-                if new_ip != self.host:
-                    self.host = new_ip
-                    # Reset broadcast socket to ensure it uses the new interface
-                    try:
-                        self.broadcast_socket.close()
-                    except:
-                        pass
-                    self.broadcast_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-                    self.broadcast_socket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-                    self.broadcast_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-
-                broadcast_data = json.dumps({
-                    'type': 'presence',
-                    'username': self.username,
-                    'group': self.group,
-                    'hostname': self.hostname,
-                    'ip': self.host,
-                    'port': self.port
-                })
-                
-                # Broadcast to current local network
-                if self.host != "127.0.0.1":
-                    host_parts = self.host.split('.')
-                    network = '.'.join(host_parts[:-1]) + '.255' if len(host_parts) > 1 else '255.255.255.255'
-                    self.broadcast_socket.sendto(
-                        broadcast_data.encode('utf-8'),
-                        (network, self.broadcast_port)
-                    )
-                
-                # Also try broadcasting to generic broadcast address as fallback
-                self.broadcast_socket.sendto(
-                    broadcast_data.encode('utf-8'),
-                    ('255.255.255.255', self.broadcast_port)
-                )
-                
+                self.host = self.get_local_ip()
+                self.broadcast_presence()
                 threading.Event().wait(5)  # Broadcast every 5 seconds
             except Exception as e:
                 threading.Event().wait(5)
@@ -3318,7 +3457,7 @@ class IPMessenger:
                     if presence_data.get('type') == 'presence':
                         ip = presence_data.get('ip', addr[0])
                         # Don't add ourselves
-                        if ip != self.host:
+                        if ip not in self.get_all_local_ips():
                             self.discovered_users[ip] = {
                                 'username': presence_data.get('username', 'Unknown'),
                                 'hostname': presence_data.get('hostname', ip),

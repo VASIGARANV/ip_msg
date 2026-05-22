@@ -51,7 +51,7 @@ def init_db():
             )
         """)
         conn.commit()
-        print(f"[DB] Database ready → {DB_PATH}")
+        print(f"[DB] Database ready -> {DB_PATH}")
     finally:
         conn.close()
 
@@ -92,7 +92,7 @@ def save_message(
         )
         conn.commit()
         row_id = cursor.lastrowid
-        print(f"[DB] Saved message id={row_id}  [{direction}] {sender} → {recipient}")
+        print(f"[DB] Saved message id={row_id}  [{direction}] {sender} -> {recipient}")
         return row_id
     finally:
         conn.close()
