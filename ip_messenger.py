@@ -335,7 +335,7 @@ class LogViewerWindow:
         # Icon-style filter buttons (★  ✉  📎 …)
         for icon, tip, cmd in [
             (self.STAR_ON, "Starred only",    self._filter_starred),
-            ("✉",          "All messages",    self.load_messages),
+            ("✉",          "All messages",    self._show_all_messages),
             ("🔍",         "Search",          self._open_search),
         ]:
             b = tk.Button(bar, text=icon, relief=tk.FLAT, padx=6,
@@ -346,15 +346,24 @@ class LogViewerWindow:
         tk.Button(bar, text="⟳", relief=tk.FLAT,
                   command=self.load_messages).pack(side=tk.RIGHT, padx=4)
 
-    # ── Tab bar ("All" tab + add button) ─────────────────────────────────────
+    # ── Tab bar ("All" and "Starred" tabs) ───────────────────────────────────
     def _build_tab_bar(self):
         tab_frame = tk.Frame(self.win, bg="#c0c0c0", height=24)
         tab_frame.pack(fill=tk.X)
 
-        self.all_tab = tk.Label(tab_frame, text="  All  ✕",
+        self.current_view = "all"  # default active view
+
+        self.all_tab = tk.Label(tab_frame, text="  All  ",
                                 bg="white", relief=tk.RIDGE,
-                                padx=6, pady=2)
+                                padx=6, pady=2, cursor="hand2")
         self.all_tab.pack(side=tk.LEFT, padx=(4, 0), pady=2)
+        self.all_tab.bind("<Button-1>", lambda e: self.switch_view("all"))
+
+        self.starred_tab = tk.Label(tab_frame, text="  Starred  ",
+                                    bg="#c0c0c0", relief=tk.FLAT,
+                                    padx=6, pady=2, cursor="hand2")
+        self.starred_tab.pack(side=tk.LEFT, padx=(2, 0), pady=2)
+        self.starred_tab.bind("<Button-1>", lambda e: self.switch_view("starred"))
 
         tk.Label(tab_frame, text=" + ", bg="#c0c0c0",
                  padx=4).pack(side=tk.LEFT)
@@ -429,10 +438,13 @@ class LogViewerWindow:
                 rows = [r for r in rows
                         if r["sender"] == user or r["recipient"] == user]
 
-        # Rebuild user combobox values
-        all_names = sorted({r["sender"] for r in message_db.get_all_messages(1000)}
-                           | {r["recipient"] for r in message_db.get_all_messages(1000)})
-        self.user_cb["values"] = ["All Users"] + all_names
+            # Starred filter
+            if getattr(self, "current_view", "all") == "starred":
+                rows = [r for r in rows if r.get("starred")]
+
+        # Rebuild user combobox values (most recently messaged users first)
+        recent_names = message_db.get_recent_users()
+        self.user_cb["values"] = ["All Users"] + recent_names
 
         # Clear inner frame
         for widget in self.inner.winfo_children():
@@ -452,8 +464,10 @@ class LogViewerWindow:
             f"{len(rows)} message{'s' if len(rows) != 1 else ''}  |  "
             "Dbl-click: Reply (with Shift, no quote)")
 
-        # scroll to bottom
-        self.win.after(50, lambda: self.canvas.yview_moveto(1.0))
+        # Reset scroll region and scroll to top so content is always visible
+        self.inner.update_idletasks()
+        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+        self.canvas.yview_moveto(0.0)
 
     def _render_row(self, row):
         """Render one message block exactly like the IPMsg LogViewer."""
@@ -498,6 +512,9 @@ class LogViewerWindow:
             state[0] = new
             btn[0].config(text=self.STAR_ON if new else self.STAR_OFF,
                           fg="#f5a623" if new else "gray")
+            # Refresh if we are in the starred view to immediately update list
+            if getattr(self, "current_view", "all") == "starred":
+                self._filter_starred()
 
         sb = tk.Button(hdr,
                        text=self.STAR_ON if row.get("starred") else self.STAR_OFF,
@@ -565,9 +582,32 @@ class LogViewerWindow:
             prefix = f"--- {sender} wrote ---\n{quoted}\n\n"
             msg_widget.insert(self.messenger.message_insert_point, prefix)
 
+    def _show_all_messages(self):
+        if hasattr(self, "all_tab") and hasattr(self, "starred_tab"):
+            self.all_tab.config(bg="white", relief=tk.RIDGE)
+            self.starred_tab.config(bg="#c0c0c0", relief=tk.FLAT)
+            self.current_view = "all"
+        self.load_messages()
+
     def _filter_starred(self):
+        if hasattr(self, "all_tab") and hasattr(self, "starred_tab"):
+            self.all_tab.config(bg="#c0c0c0", relief=tk.FLAT)
+            self.starred_tab.config(bg="white", relief=tk.RIDGE)
+            self.current_view = "starred"
         rows = message_db.get_starred_messages()
         self.load_messages(rows=rows)
+
+    def switch_view(self, view_name):
+        """Switch active tab between 'all' and 'starred'"""
+        self.current_view = view_name
+        if view_name == "all":
+            self.all_tab.config(bg="white", relief=tk.RIDGE)
+            self.starred_tab.config(bg="#c0c0c0", relief=tk.FLAT)
+            self.load_messages()
+        elif view_name == "starred":
+            self.all_tab.config(bg="#c0c0c0", relief=tk.FLAT)
+            self.starred_tab.config(bg="white", relief=tk.RIDGE)
+            self._filter_starred()
 
     def _open_search(self):
         """Simple search dialog."""
@@ -2201,6 +2241,9 @@ class IPMessenger:
             if hasattr(self, 'inline_images'):
                 self.inline_images = []
             self.update_attachment_display()
+            
+            # Minimize the window after successful send
+            self.root.iconify()
         else:
             messagebox.showerror("Error", "Failed to send message. Check connections.")
     
@@ -2221,7 +2264,8 @@ class IPMessenger:
             # Create connection
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(3)
-            sock.connect((target_ip, self.port))
+            target_port = self.discovered_users.get(target_ip, {}).get('port', self.port)
+            sock.connect((target_ip, target_port))
             
             # Prepare message data for network
             message_data = {
@@ -2229,6 +2273,7 @@ class IPMessenger:
                 'sender_ip': self.host,
                 'sender_username': self.username,
                 'sender_hostname': self.hostname,
+                'port': self.port,
                 'timestamp': datetime.datetime.now().isoformat(),
                 'sealed': is_sealed
             }
@@ -2407,7 +2452,7 @@ class IPMessenger:
             
             try:
                 message_data = json.loads(data)
-                sender_ip = message_data.get('sender_ip', address[0])
+                sender_ip = address[0]
                 sender_username = message_data.get('sender_username', None)
                 
                 if message_data.get('type') == 'read_receipt':
@@ -2435,11 +2480,12 @@ class IPMessenger:
                     return
 
                 # Update discovered users
-                if sender_ip not in self.get_all_local_ips():
+                if sender_ip not in self.get_all_local_ips() and sender_ip not in ["127.0.0.1", "localhost"]:
                     self.discovered_users[sender_ip] = {
                         'username': sender_username or 'Unknown',
                         'hostname': message_data.get('sender_hostname', sender_ip),
                         'group': '',
+                        'port': message_data.get('port', self.port),
                         'last_seen': datetime.datetime.now()
                     }
                 
@@ -2778,12 +2824,14 @@ class IPMessenger:
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(2)
-            sock.connect((target_ip, self.port))
+            target_port = self.discovered_users.get(target_ip, {}).get('port', self.port)
+            sock.connect((target_ip, target_port))
             
             data = json.dumps({
                 'type': 'read_receipt',
                 'sender_username': self.username,
-                'sender_ip': self.host
+                'sender_ip': self.host,
+                'port': self.port
             }).encode('utf-8')
             
             sock.sendall(data)
@@ -3285,13 +3333,15 @@ class IPMessenger:
             connect_ip = sender_ip
             if connect_ip == self.host: connect_ip = "127.0.0.1"
             
-            sock.connect((connect_ip, self.port))
+            target_port = self.discovered_users.get(sender_ip, {}).get('port', self.port)
+            sock.connect((connect_ip, target_port))
             
             request = {
                 'type': 'file_request',
                 'file_name': file_name,
                 'sender_ip': self.host,
-                'sender_username': self.username
+                'sender_username': self.username,
+                'port': self.port
             }
             sock.sendall(json.dumps(request).encode('utf-8'))
             sock.shutdown(socket.SHUT_WR) # Signal end of request to server
@@ -3455,13 +3505,14 @@ class IPMessenger:
                 try:
                     presence_data = json.loads(data.decode('utf-8'))
                     if presence_data.get('type') == 'presence':
-                        ip = presence_data.get('ip', addr[0])
+                        ip = addr[0]
                         # Don't add ourselves
-                        if ip not in self.get_all_local_ips():
+                        if ip not in self.get_all_local_ips() and ip not in ["127.0.0.1", "localhost"]:
                             self.discovered_users[ip] = {
                                 'username': presence_data.get('username', 'Unknown'),
                                 'hostname': presence_data.get('hostname', ip),
                                 'group': presence_data.get('group', ''),
+                                'port': presence_data.get('port', self.port),
                                 'last_seen': datetime.datetime.now()
                             }
                 except json.JSONDecodeError:

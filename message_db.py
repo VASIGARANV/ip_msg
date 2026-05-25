@@ -51,6 +51,15 @@ def init_db():
             )
         """)
         conn.commit()
+
+        # Migration check: Ensure 'starred' column exists in case the table was created under an older schema
+        cursor = conn.execute("PRAGMA table_info(messages)")
+        columns = [info[1] for info in cursor.fetchall()]
+        if columns and "starred" not in columns:
+            conn.execute("ALTER TABLE messages ADD COLUMN starred INTEGER NOT NULL DEFAULT 0")
+            conn.commit()
+            print("[DB] Added 'starred' column to existing messages table.")
+
         print(f"[DB] Database ready -> {DB_PATH}")
     finally:
         conn.close()
@@ -193,6 +202,29 @@ def get_starred_messages(limit: int = 200) -> list[dict]:
             (limit,),
         ).fetchall()
         return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def get_recent_users() -> list[str]:
+    """
+    Return distinct usernames ordered by most recent message interaction.
+    Combines both sender and recipient names, deduplicates, and sorts
+    by the latest timestamp (most recent first).
+    """
+    conn = _get_connection()
+    try:
+        rows = conn.execute("""
+            SELECT name, MAX(ts) AS last_ts FROM (
+                SELECT sender AS name, timestamp AS ts FROM messages
+                UNION ALL
+                SELECT recipient AS name, timestamp AS ts FROM messages
+            )
+            WHERE name != ''
+            GROUP BY name
+            ORDER BY last_ts DESC
+        """).fetchall()
+        return [r[0] for r in rows]
     finally:
         conn.close()
 
