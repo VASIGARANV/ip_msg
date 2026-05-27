@@ -6,8 +6,8 @@ import datetime
 import json
 import os
 import base64
+import io
 from PIL import Image, ImageGrab, ImageTk
-import tempfile
 from main_settings import MainSettingsDialog
 import message_db
 
@@ -159,7 +159,8 @@ class AttachmentManager:
         btn_frame.pack(fill=tk.X)
         
         # Left side buttons
-        ttk.Button(btn_frame, text="File/Folder Add", command=self.add_file).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="File Add", command=self.add_files_dialog).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="Folder Add", command=self.add_folder_dialog).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="Open", command=self.open_current_selection).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="Folder", command=self.open_current_folder).pack(side=tk.LEFT, padx=5)
         
@@ -168,6 +169,32 @@ class AttachmentManager:
         ttk.Button(btn_frame, text="Delete", command=self.delete_file).pack(side=tk.RIGHT, padx=5)
         
         self.populate_tree()
+
+        # Schedule Drag & Drop setup after realization to ensure valid winfo_id / HWND
+        self.window.after(200, self.setup_drag_drop)
+
+    def setup_drag_drop(self):
+        try:
+            import windnd
+            import ctypes
+            
+            hwnd_win = self.window.winfo_id()
+            hwnd_tree = self.tree.winfo_id()
+            
+            for hwnd in (hwnd_win, hwnd_tree):
+                try:
+                    ctypes.windll.user32.ChangeWindowMessageFilterEx(hwnd, 0x233, 1, None)
+                    ctypes.windll.user32.ChangeWindowMessageFilterEx(hwnd, 0x0049, 1, None)
+                except:
+                    try:
+                        ctypes.windll.user32.ChangeWindowMessageFilter(0x233, 1)
+                        ctypes.windll.user32.ChangeWindowMessageFilter(0x0049, 1)
+                    except: pass
+            
+            windnd.hook_dropfiles(self.window, self.handle_dropped_files)
+            windnd.hook_dropfiles(self.tree, self.handle_dropped_files)
+        except:
+            pass
 
     def populate_tree(self):
         # Clear existing
@@ -227,10 +254,46 @@ class AttachmentManager:
             else:
                  messagebox.showwarning("Not Found", "Path not found.")
 
-    def add_file(self):
-        file_path = filedialog.askopenfilename(title="Select File")
-        if file_path and file_path not in self.attached_files:
-            self.attached_files.append(file_path)
+
+
+    def add_files_dialog(self):
+        file_paths = filedialog.askopenfilenames(title="Select File(s)")
+        if file_paths:
+            added = 0
+            for path in file_paths:
+                if path not in self.attached_files:
+                    self.attached_files.append(path)
+                    added += 1
+            if added > 0:
+                self.populate_tree()
+                self.callback(self.attached_files)
+
+    def add_folder_dialog(self):
+        folder_path = filedialog.askdirectory(title="Select Folder")
+        if folder_path and folder_path not in self.attached_files:
+            self.attached_files.append(folder_path)
+            self.populate_tree()
+            self.callback(self.attached_files)
+
+    def handle_dropped_files(self, files):
+        added = 0
+        for f in files:
+            if isinstance(f, bytes):
+                try:
+                    path = f.decode('utf-8')
+                except UnicodeDecodeError:
+                    try:
+                        import sys
+                        path = f.decode(sys.getfilesystemencoding())
+                    except UnicodeDecodeError:
+                        path = f.decode('gbk', errors='replace')
+            else:
+                path = f
+            
+            if path not in self.attached_files:
+                self.attached_files.append(path)
+                added += 1
+        if added > 0:
             self.populate_tree()
             self.callback(self.attached_files)
 
@@ -949,7 +1012,8 @@ class IPMessenger:
         
         menu.add_separator()
         
-        menu.add_command(label="File/Folder Attach", command=self.attach_file_folder)
+        menu.add_command(label="File Attach", command=self.add_files_dialog_main)
+        menu.add_command(label="Folder Attach", command=self.add_folder_dialog_main)
         
         # Image & Capture submenu
         image_menu = tk.Menu(menu, tearoff=0)
@@ -1032,11 +1096,8 @@ class IPMessenger:
         doc_btn = ttk.Button(controls_frame, text="📄", command=self.open_attachment_manager, width=3)
         doc_btn.grid(row=0, column=1, padx=(0, 5), sticky=tk.W)
         
-        # Setup Drag & Drop for main window
-        try:
-            import windnd
-            windnd.hook_dropfiles(self.root, lambda files: self.handle_dropped_files(files))
-        except: pass
+        # Schedule Drag & Drop setup after realization to ensure valid winfo_id / HWND
+        self.root.after(500, self.setup_drag_drop)
 
         # Send button (right side)
         send_btn = ttk.Button(controls_frame, text="Send", command=self.send_message, width=12)
@@ -1050,6 +1111,36 @@ class IPMessenger:
         # Update user list periodically
         self.update_user_list()
         self.update_member_count()
+    
+    def setup_drag_drop(self):
+        """Register robust drag-and-drop after windows are fully realized, bypassing UAC filters if running elevated"""
+        try:
+            import windnd
+            import ctypes
+            
+            # Ensure window is fully drawn and has a real HWND
+            hwnd_root = self.root.winfo_id()
+            hwnd_txt = self.message_text.winfo_id()
+            hwnd_tree = self.user_tree.winfo_id()
+            
+            # Add message filter exception for elevated UAC privilege drag-and-drop
+            # WM_DROPFILES = 0x233, WM_COPYGLOBALDATA = 0x0049
+            for hwnd in (hwnd_root, hwnd_txt, hwnd_tree):
+                try:
+                    ctypes.windll.user32.ChangeWindowMessageFilterEx(hwnd, 0x233, 1, None)
+                    ctypes.windll.user32.ChangeWindowMessageFilterEx(hwnd, 0x0049, 1, None)
+                except:
+                    try:
+                        ctypes.windll.user32.ChangeWindowMessageFilter(0x233, 1)
+                        ctypes.windll.user32.ChangeWindowMessageFilter(0x0049, 1)
+                    except:
+                        pass
+                        
+            windnd.hook_dropfiles(self.root, lambda files: self.handle_dropped_files(files))
+            windnd.hook_dropfiles(self.message_text, lambda files: self.handle_dropped_files(files))
+            windnd.hook_dropfiles(self.user_tree, lambda files: self.handle_dropped_files(files))
+        except Exception as e:
+            print(f"[DragDrop] Setup failed: {e}")
     
     # ── Message-area right-click context menu ────────────────────────────────
     def _setup_message_context_menu(self):
@@ -1649,20 +1740,42 @@ class IPMessenger:
         self.message_priority = priority
         messagebox.showinfo("Priority Set", f"Message priority set to: {priority}")
     
-    def attach_file_folder(self):
-        """Attach file or folder"""
-        file_path = filedialog.askopenfilename(title="Select File")
-        if file_path:
-            if file_path not in self.attached_files:
-                self.attached_files.append(file_path)
+
+
+    def add_files_dialog_main(self):
+        file_paths = filedialog.askopenfilenames(title="Select File(s)")
+        if file_paths:
+            added = 0
+            for path in file_paths:
+                if path not in self.attached_files:
+                    self.attached_files.append(path)
+                    added += 1
+            if added > 0:
                 self.update_attachment_display()
+
+    def add_folder_dialog_main(self):
+        folder_path = filedialog.askdirectory(title="Select Folder")
+        if folder_path and folder_path not in self.attached_files:
+            self.attached_files.append(folder_path)
+            self.update_attachment_display()
     
     def handle_dropped_files(self, files, target_list=None):
         """Handle files dropped onto the window"""
         t_list = target_list if target_list is not None else self.attached_files
         added = 0
         for f in files:
-            path = f.decode('gbk') if isinstance(f, bytes) else f
+            if isinstance(f, bytes):
+                try:
+                    path = f.decode('utf-8')
+                except UnicodeDecodeError:
+                    try:
+                        import sys
+                        path = f.decode(sys.getfilesystemencoding())
+                    except UnicodeDecodeError:
+                        path = f.decode('gbk', errors='replace')
+            else:
+                path = f
+            
             if path not in t_list:
                 t_list.append(path)
                 added += 1
@@ -1684,31 +1797,36 @@ class IPMessenger:
         self.root.deiconify()  # Restore main window
         if image:
             try:
-                # Save to temp file
-                temp_file = tempfile.NamedTemporaryFile(suffix='.png', delete=False).name
-                image.save(temp_file)
-                
                 # Target identification
                 txt_widget = target_text if target_text else self.message_text
                 
                 if target_list is not None:
-                    target_list.append(temp_file)
+                    target_list.append(image)
                 else:
                     if not hasattr(self, 'inline_images'):
                         self.inline_images = []
-                    self.inline_images.append(temp_file)
+                    self.inline_images.append(image)
                 
-                # Insert directly into message area
-                self.insert_image_to_message(temp_file, txt_widget)
+                # Insert directly into message area (pass PIL Image, no temp file)
+                self.insert_image_to_message(image, txt_widget)
             except Exception as e:
-                messagebox.showerror("Capture Error", f"Failed to save screenshot: {str(e)}")
+                messagebox.showerror("Capture Error", f"Failed to process screenshot: {str(e)}")
     
-    def insert_image_to_message(self, image_path, target_text=None):
-        """Insert image into message text area"""
+    def insert_image_to_message(self, image_source, target_text=None):
+        """Insert image into message text area.
+        image_source can be a PIL Image object or a file path string."""
         txt = target_text if target_text else self.message_text
         try:
+            # Accept both PIL Image objects and file paths
+            if isinstance(image_source, Image.Image):
+                img = image_source.copy()
+            else:
+                img = Image.open(image_source)
+            
+            # Keep a reference to the original PIL image for saving
+            original_img = img.copy()
+            
             # Resize for display if too large
-            img = Image.open(image_path)
             # Max height 150px
             base_height = 150
             if img.size[1] > base_height:
@@ -1719,29 +1837,71 @@ class IPMessenger:
             photo = ImageTk.PhotoImage(img)
             self.chat_images.append(photo) # Keep reference to prevent GC
             
+            # Create a label to hold the image, allowing right-click to save
+            lbl = tk.Label(txt, image=photo, bg="white", cursor="hand2")
+            lbl.photo = photo
+            lbl.bind("<Button-3>", lambda event, pil_img=original_img: self.show_image_context_menu(event, pil_img))
+            
             txt.insert(tk.INSERT, "\n")
-            txt.image_create(tk.INSERT, image=photo, padx=5, pady=5)
+            txt.window_create(tk.INSERT, window=lbl, padx=5, pady=5)
             txt.insert(tk.INSERT, "\n")
             txt.see(tk.END)
         except Exception as e:
             print(f"Error displaying image: {e}")
+
+    def show_image_context_menu(self, event, image_source):
+        """Show context menu for inline images to allow saving them to the local system.
+        image_source can be a PIL Image object or a file path string."""
+        menu = tk.Menu(self.root, tearoff=0)
+        
+        def save_image():
+            ftypes = [("PNG Image", "*.png"), ("JPEG Image", "*.jpg;*.jpeg"), ("All Files", "*.*")]
+            
+            dst = filedialog.asksaveasfilename(
+                initialfile="saved_image.png",
+                title="Save Image As",
+                defaultextension=".png",
+                filetypes=ftypes,
+                parent=self.root
+            )
+            if dst:
+                try:
+                    if isinstance(image_source, Image.Image):
+                        image_source.save(dst)
+                    elif isinstance(image_source, bytes):
+                        with open(dst, 'wb') as f:
+                            f.write(image_source)
+                    else:
+                        # Fallback: treat as file path
+                        if os.path.exists(image_source):
+                            import shutil
+                            shutil.copy2(image_source, dst)
+                        else:
+                            messagebox.showerror("Error", "Source image not available.")
+                            return
+                    self.status_var.set(f"Image saved to {dst}")
+                except Exception as e:
+                    messagebox.showerror("Save Error", f"Failed to save image:\n{e}")
+                    
+        menu.add_command(label="Save Selected Image...", command=save_image)
+        
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
     
     def paste_image(self):
         """Paste image from clipboard"""
         try:
             image = ImageGrab.grabclipboard()
             if isinstance(image, Image.Image):
-                # Save to temp file
-                temp_file = tempfile.NamedTemporaryFile(suffix='.png', delete=False).name
-                image.save(temp_file)
-                
-                # Store in inline_images instead of attached_files
+                # Store PIL Image directly in memory (no temp file)
                 if not hasattr(self, 'inline_images'):
                     self.inline_images = []
-                self.inline_images.append(temp_file)
+                self.inline_images.append(image)
                 
                 # Insert directly into message area
-                self.insert_image_to_message(temp_file)
+                self.insert_image_to_message(image)
 
             elif isinstance(image, list):
                 # Handle file copy - treat as inline image if it's an image file
@@ -2283,25 +2443,43 @@ class IPMessenger:
                 files_meta = []
                 first_image_set = False
                 
-                for file_path in attached_files:
+                for file_item in attached_files:
                     try:
-                        file_name = os.path.basename(file_path)
-                        file_size = os.path.getsize(file_path) if os.path.isfile(file_path) else 0
-                        files_meta.append({
-                            'name': file_name,
-                            'size': file_size,
-                            'type': 'dir' if os.path.isdir(file_path) else 'file'
-                        })
-                        
-                        with self.offered_files_lock:
-                            self.offered_files[file_name] = file_path
+                        if isinstance(file_item, Image.Image):
+                            # PIL Image from capture/paste (in-memory, no temp file)
+                            img_name = f"screenshot_{id(file_item)}.png"
+                            buf = io.BytesIO()
+                            file_item.save(buf, format='PNG')
+                            img_bytes = buf.getvalue()
+                            files_meta.append({
+                                'name': img_name,
+                                'size': len(img_bytes),
+                                'type': 'file'
+                            })
+                            if not first_image_set:
+                                message_data['image'] = base64.b64encode(img_bytes).decode('utf-8')
+                                message_data['image_name'] = img_name
+                                first_image_set = True
+                        else:
+                            # Regular file path
+                            file_path = file_item
+                            file_name = os.path.basename(file_path)
+                            file_size = os.path.getsize(file_path) if os.path.isfile(file_path) else 0
+                            files_meta.append({
+                                'name': file_name,
+                                'size': file_size,
+                                'type': 'dir' if os.path.isdir(file_path) else 'file'
+                            })
+                            
+                            with self.offered_files_lock:
+                                self.offered_files[file_name] = file_path
 
-                        if not first_image_set and os.path.isfile(file_path) and file_name.lower().endswith(('.png', '.jpg', '.jpeg')):
-                            with open(file_path, 'rb') as f:
-                                image_data = base64.b64encode(f.read()).decode('utf-8')
-                            message_data['image'] = image_data
-                            message_data['image_name'] = file_name
-                            first_image_set = True
+                            if not first_image_set and os.path.isfile(file_path) and file_name.lower().endswith(('.png', '.jpg', '.jpeg')):
+                                with open(file_path, 'rb') as f:
+                                    image_data = base64.b64encode(f.read()).decode('utf-8')
+                                message_data['image'] = image_data
+                                message_data['image_name'] = file_name
+                                first_image_set = True
                     except:
                         pass
                 
@@ -2324,6 +2502,28 @@ class IPMessenger:
         """Handle message sent to self with attachment support"""
         timestamp = datetime.datetime.now().isoformat()
         is_sealed = message.startswith("[SEALED]")
+        
+        self_image_data = None
+        self_image_name = None
+        # Extract self-sent image details if any
+        for file_item in attached_files:
+            if isinstance(file_item, Image.Image):
+                try:
+                    buf = io.BytesIO()
+                    file_item.save(buf, format='PNG')
+                    self_image_data = base64.b64encode(buf.getvalue()).decode('utf-8')
+                    self_image_name = f"screenshot_{id(file_item)}.png"
+                    break
+                except:
+                    pass
+            elif os.path.isfile(file_item) and file_item.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.bmp')):
+                try:
+                    with open(file_item, 'rb') as f:
+                        self_image_data = base64.b64encode(f.read()).decode('utf-8')
+                    self_image_name = os.path.basename(file_item)
+                    break
+                except:
+                    pass
         
         # Prepare file metadata
         files_meta = []
@@ -2353,7 +2553,7 @@ class IPMessenger:
         if len(toast_msg) > 60: toast_msg = toast_msg[:57] + "..."
 
         # Callback for when toast is clicked
-        def on_click(m=display_text, fm=files_meta, ts=timestamp):
+        def on_click(m=display_text, fm=files_meta, ts=timestamp, img_d=self_image_data, img_n=self_image_name):
             # Save to log/db (Clean text only)
             message_db.save_message(
                 direction  = "received",
@@ -2361,14 +2561,14 @@ class IPMessenger:
                 recipient  = self.username,
                 message    = m,
                 ip         = self.host,
-                has_attach = bool(fm),
+                has_attach = bool(fm or img_d),
                 timestamp  = ts.replace('T', ' ').split('.')[0] # Format for DB
             )
             # Log to file (Clean)
-            _write_log("received", self.username, self.username, m, ts, bool(fm))
+            _write_log("received", self.username, self.username, m, ts, bool(fm or img_d))
             
             self.show_receive_message(self.username, self.hostname, self.host, 
-                                   m, ts, sealed=is_sealed, files_meta=fm)
+                                   m, ts, sealed=is_sealed, files_meta=fm, image_data=img_d, image_name=img_n)
             
         self.show_toast_notification(
             self.username, self.hostname, self.host, 
@@ -2545,15 +2745,16 @@ class IPMessenger:
                 _ts     = timestamp
 
                 def show_toast(su=_s_user, sh=_s_host, si=_s_ip,
-                               m=_msg, t=_ts, sl=_sealed, fm=message_data.get('files', [])):
+                               m=_msg, t=_ts, sl=_sealed, fm=message_data.get('files', []),
+                               img_d=message_data.get('image'), img_n=message_data.get('image_name')):
                     # For sealed messages show "(Sealed Message)" in the toast body
                     # so the content is NOT revealed in the notification popup
                     display_msg = "(Sealed Message)" if sl else m
 
                     # Callback: clicking the toast opens the receive window with
                     # the actual decoded message and the correct sealed flag
-                    def on_click(su=su, sh=sh, si=si, m=m, t=t, sl=sl, fm=fm):
-                        self.show_receive_message(su, sh, si, m, t, sealed=sl, files_meta=fm)
+                    def on_click(su=su, sh=sh, si=si, m=m, t=t, sl=sl, fm=fm, img_d=img_d, img_n=img_n):
+                        self.show_receive_message(su, sh, si, m, t, sealed=sl, files_meta=fm, image_data=img_d, image_name=img_n)
 
                     self.show_toast_notification(su, sh, si, display_msg, t,
                                                  callback=on_click)
@@ -2839,7 +3040,7 @@ class IPMessenger:
         except:
             pass
 
-    def show_receive_message(self, sender_username, sender_hostname, sender_ip, message, timestamp, sealed=False, files_meta=[]):
+    def show_receive_message(self, sender_username, sender_hostname, sender_ip, message, timestamp, sealed=False, files_meta=[], image_data=None, image_name=None):
         """Show receive message window"""
         receive_window = tk.Toplevel(self.root)
         receive_window.title("Receive Message ++++")
@@ -2962,6 +3163,42 @@ class IPMessenger:
             threading.Thread(target=self.send_read_receipt,
                              args=(sender_ip,), daemon=True).start()
 
+        def display_image_if_present(txt_widget):
+            if image_data:
+                try:
+                    img_bytes = base64.b64decode(image_data)
+                    
+                    # Load image directly from bytes in memory (no temp file)
+                    img = Image.open(io.BytesIO(img_bytes))
+                    original_img = img.copy()  # Keep full-size copy for saving
+                    
+                    base_height = 200
+                    if img.size[1] > base_height:
+                        h_percent = (base_height / float(img.size[1]))
+                        w_size = int((float(img.size[0]) * float(h_percent)))
+                        img = img.resize((w_size, base_height), Image.Resampling.LANCZOS)
+                        
+                    photo = ImageTk.PhotoImage(img)
+                    self.chat_images.append(photo)
+                    
+                    txt_widget.config(state=tk.NORMAL)
+                    txt_widget.insert(tk.END, "\n\n")
+                    
+                    lbl = tk.Label(txt_widget, image=photo, bg="white", cursor="hand2")
+                    lbl.photo = photo
+                    lbl.bind("<Button-3>", lambda event, pil_img=original_img: self.show_image_context_menu(event, pil_img))
+                    
+                    def on_enter(e): self.status_var.set("Right-click to save image")
+                    def on_leave(e): self.status_var.set("Ready")
+                    lbl.bind("<Enter>", on_enter)
+                    lbl.bind("<Leave>", on_leave)
+                    
+                    txt_widget.window_create(tk.END, window=lbl, padx=5, pady=5)
+                    txt_widget.insert(tk.END, "\n")
+                    txt_widget.config(state=tk.DISABLED)
+                except Exception as e:
+                    print(f"Error displaying received image: {e}")
+
         if sealed:
             # ── SEALED: EXACT MATCH FOR SCREENSHOT "Open" BOX ────────
             receive_window.geometry("380x280")
@@ -3009,6 +3246,7 @@ class IPMessenger:
                 txt.delete("1.0", tk.END)
                 txt.insert("1.0", message)
                 txt.config(state=tk.DISABLED)
+                display_image_if_present(txt)
 
             seal_box.bind("<Button-1>", reveal_message)
             # Exact hover colors for premium feel
@@ -3028,6 +3266,7 @@ class IPMessenger:
             txt.delete("1.0", tk.END)
             txt.insert("1.0", message)
             txt.config(state=tk.DISABLED)
+            display_image_if_present(txt)
             self.receipt_sent_map[sender_ip] = True
 
         
@@ -3114,6 +3353,65 @@ class IPMessenger:
         refresh_btn = ttk.Button(member_panel, text="⟳", command=lambda: self.refresh_user_list_dialog(user_tree, member_panel), width=3)
         refresh_btn.pack(pady=(10, 0))
         
+        # Dropdown arrow button with menu functionality (same as main window)
+        dropdown_btn = ttk.Menubutton(member_panel, text="▼", width=3)
+        dropdown_btn.pack(pady=(5, 0))
+        
+        reply_menu = tk.Menu(dropdown_btn, tearoff=0)
+        dropdown_btn.config(menu=reply_menu)
+        
+        # User History submenu
+        reply_history_menu = tk.Menu(reply_menu, tearoff=0)
+        reply_menu.add_cascade(label="User History(1)", menu=reply_history_menu)
+        reply_history_menu.add_command(label="Recent Users", command=self.show_user_history)
+        
+        reply_menu.add_command(label="Search User (Ctrl-F)", command=self.search_user)
+        reply_menu.add_command(label="Send to Admin", command=self.send_to_admin)
+        
+        # Group Select submenu
+        reply_group_menu = tk.Menu(reply_menu, tearoff=0)
+        reply_menu.add_cascade(label="Group Select", menu=reply_group_menu)
+        reply_group_menu.add_command(label="Create Group", command=self.create_group)
+        reply_group_menu.add_command(label="Select Group", command=self.select_group)
+        
+        # Priority Settings submenu
+        reply_priority_menu = tk.Menu(reply_menu, tearoff=0)
+        reply_menu.add_cascade(label="Priority Settings", menu=reply_priority_menu)
+        reply_priority_menu.add_command(label="High Priority", command=lambda: self.set_priority("High"))
+        reply_priority_menu.add_command(label="Normal Priority", command=lambda: self.set_priority("Normal"))
+        reply_priority_menu.add_command(label="Low Priority", command=lambda: self.set_priority("Low"))
+        
+        reply_menu.add_separator()
+        
+        reply_menu.add_command(label="File Attach", command=lambda: self._reply_add_files(dialog, attached_files))
+        reply_menu.add_command(label="Folder Attach", command=lambda: self._reply_add_folder(dialog, attached_files))
+        
+        # Image & Capture submenu
+        reply_image_menu = tk.Menu(reply_menu, tearoff=0)
+        reply_menu.add_cascade(label="Image & Capture", menu=reply_image_menu)
+        reply_image_menu.add_command(label="Display Capture (Ctrl-K)", command=lambda: self.capture_screen(target_text=message_text, target_list=attached_files))
+        reply_image_menu.add_command(label="Paste image", command=self.paste_image)
+        reply_image_menu.add_command(label="Insert Image File...", command=self.attach_image)
+        
+        reply_menu.add_separator()
+        
+        # Size/Font/Pos Setting submenu
+        reply_size_menu = tk.Menu(reply_menu, tearoff=0)
+        reply_menu.add_cascade(label="Size/Font/Pos Setting", menu=reply_size_menu)
+        reply_size_menu.add_command(label="Save size/header as default", command=self.save_size_header_default)
+        reply_size_menu.add_command(label="Restore default size (temporary)", command=self.restore_default_size)
+        reply_size_menu.add_separator()
+        reply_size_menu.add_command(label="List Font...", command=self.list_font_settings)
+        reply_size_menu.add_command(label="Edit Font...", command=self.edit_font_settings)
+        reply_size_menu.add_command(label="Restore default Font", command=self.restore_default_font)
+        
+        reply_menu.add_command(label="Disp Setting...", command=self.display_settings)
+        reply_menu.add_command(label="MainSettings...", command=self.main_settings)
+        
+        reply_menu.add_separator()
+        
+        reply_menu.add_command(label="Open LogViewer", command=self.open_log_viewer)
+        
         # Message input area - reduced padding
         msg_input_frame = ttk.LabelFrame(main_container, text="Message", padding="5")
         msg_input_frame.grid(row=1, column=0, columnspan=2, sticky="wens", pady=(0, 5))
@@ -3169,10 +3467,12 @@ class IPMessenger:
         doc_btn = ttk.Button(controls_frame, text="📄", command=open_attachments, width=3)
         doc_btn.grid(row=0, column=1, padx=(0, 5), sticky=tk.W)
         
-        # Setup Drag & Drop for reply dialog
+        # Setup Drag & Drop for reply dialog, message text area, and user treeview
         try:
             import windnd
             windnd.hook_dropfiles(dialog, lambda files: self.handle_dropped_files(files, target_list=attached_files))
+            windnd.hook_dropfiles(message_text, lambda files: self.handle_dropped_files(files, target_list=attached_files))
+            windnd.hook_dropfiles(user_tree, lambda files: self.handle_dropped_files(files, target_list=attached_files))
         except: pass
         
         # Send button
@@ -3237,6 +3537,20 @@ class IPMessenger:
         
         # Store seal_var for use in send_reply
         dialog.seal_var = seal_var
+
+    def _reply_add_files(self, parent_dialog, attached_files):
+        """Add files via file dialog for the reply window."""
+        file_paths = filedialog.askopenfilenames(title="Select File(s)", parent=parent_dialog)
+        if file_paths:
+            for path in file_paths:
+                if path not in attached_files:
+                    attached_files.append(path)
+
+    def _reply_add_folder(self, parent_dialog, attached_files):
+        """Add a folder via folder dialog for the reply window."""
+        folder_path = filedialog.askdirectory(title="Select Folder", parent=parent_dialog)
+        if folder_path and folder_path not in attached_files:
+            attached_files.append(folder_path)
 
     def show_attachments_dialog(self, sender_ip, files_meta):
         """Show dialog to view and download received attachments"""
